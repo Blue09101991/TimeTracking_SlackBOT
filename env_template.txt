@@ -17,6 +17,17 @@ PORT=3000
 DB_PATH=time_tracking.db
 
 # Reminder Schedule Configuration
+# 
+# OPTION 1: Minute-based intervals (RECOMMENDED for frequent reminders)
+# REMINDER_INTERVAL_MINUTES: How often reminders are sent (in minutes)
+#   Examples: 1 = every 1 minute
+#            5 = every 5 minutes
+#            15 = every 15 minutes
+#            30 = every 30 minutes
+#   Leave empty to use hour-based intervals (OPTION 2)
+REMINDER_INTERVAL_MINUTES=
+
+# OPTION 2: Hour-based intervals (use if REMINDER_INTERVAL_MINUTES is empty)
 # REMINDER_MINUTE: Minute of the hour when reminders are sent (0-59)
 #   Examples: 0 = every hour at :00 (9:00, 10:00, 11:00)
 #            30 = every hour at :30 (9:30, 10:30, 11:30)

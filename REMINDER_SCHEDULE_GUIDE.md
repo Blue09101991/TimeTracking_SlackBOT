@@ -11,13 +11,48 @@ The reminder button timing is controlled in **two places**:
 
 Edit your `.env` file and add these variables:
 
+### For Minute-Based Intervals (Every 1, 5, 15, 30 minutes, etc.)
+
+```bash
+# Send reminders every X minutes
+REMINDER_INTERVAL_MINUTES=1  # Every 1 minute (or 5, 15, 30, etc.)
+```
+
+### For Hour-Based Intervals (Every hour, 2 hours, etc.)
+
 ```bash
 # Control when buttons appear
 REMINDER_MINUTE=0          # Minute of hour (0-59)
 REMINDER_INTERVAL_HOURS=1  # How often (in hours)
 ```
 
+**Note:** `REMINDER_INTERVAL_MINUTES` takes priority. If it's set, hour-based settings are ignored.
+
 ### Examples
+
+**Every 1 minute** ⭐ (NEW - Perfect for frequent check-ins!)
+```bash
+REMINDER_INTERVAL_MINUTES=1
+```
+Result: Buttons appear every minute (9:00, 9:01, 9:02, 9:03, etc.)
+
+**Every 5 minutes**
+```bash
+REMINDER_INTERVAL_MINUTES=5
+```
+Result: Buttons appear at 9:00, 9:05, 9:10, 9:15, etc.
+
+**Every 15 minutes**
+```bash
+REMINDER_INTERVAL_MINUTES=15
+```
+Result: Buttons appear at 9:00, 9:15, 9:30, 9:45, etc.
+
+**Every 30 minutes**
+```bash
+REMINDER_INTERVAL_MINUTES=30
+```
+Result: Buttons appear at 9:00, 9:30, 10:00, 10:30, etc.
 
 **Every hour at :00 (default)**
 ```bash
@@ -33,26 +68,12 @@ REMINDER_INTERVAL_HOURS=1
 ```
 Result: Buttons appear at 9:30, 10:30, 11:30, 12:30, etc.
 
-**Every hour at :15**
-```bash
-REMINDER_MINUTE=15
-REMINDER_INTERVAL_HOURS=1
-```
-Result: Buttons appear at 9:15, 10:15, 11:15, 12:15, etc.
-
 **Every 2 hours at :00**
 ```bash
 REMINDER_MINUTE=0
 REMINDER_INTERVAL_HOURS=2
 ```
 Result: Buttons appear at 9:00, 11:00, 13:00, 15:00, etc.
-
-**Every 30 minutes (at :00 and :30)**
-```bash
-REMINDER_MINUTE=0
-REMINDER_INTERVAL_HOURS=0.5
-```
-Note: For intervals less than 1 hour, you'll need to modify the code (see Method 2).
 
 ## Method 2: Code Configuration (Advanced)
 
@@ -123,14 +144,17 @@ sudo journalctl -u slack-time-bot | grep "Hourly reminders scheduled"
 
 ## Common Use Cases
 
-| Use Case | REMINDER_MINUTE | REMINDER_INTERVAL_HOURS |
-|----------|----------------|------------------------|
-| Every hour at :00 | 0 | 1 |
-| Every hour at :30 | 30 | 1 |
-| Every hour at :15 | 15 | 1 |
-| Every 2 hours at :00 | 0 | 2 |
-| Every 4 hours at :00 | 0 | 4 |
-| Every 30 minutes | (requires code change) | - |
+| Use Case | REMINDER_INTERVAL_MINUTES | REMINDER_MINUTE | REMINDER_INTERVAL_HOURS |
+|----------|--------------------------|-----------------|------------------------|
+| Every 1 minute | 1 | - | - |
+| Every 5 minutes | 5 | - | - |
+| Every 15 minutes | 15 | - | - |
+| Every 30 minutes | 30 | - | - |
+| Every hour at :00 | - | 0 | 1 |
+| Every hour at :30 | - | 30 | 1 |
+| Every hour at :15 | - | 15 | 1 |
+| Every 2 hours at :00 | - | 0 | 2 |
+| Every 4 hours at :00 | - | 0 | 4 |
 
 ## Important Notes
 
