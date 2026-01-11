@@ -48,6 +48,10 @@ CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
 # Store user IDs for tracking (4 members)
 TRACKED_USERS = os.environ.get("TRACKED_USER_IDS", "").split(",") if os.environ.get("TRACKED_USER_IDS") else []
 
+# Reminder schedule configuration
+REMINDER_MINUTE = int(os.environ.get("REMINDER_MINUTE", "0"))  # Default: every hour at :00
+REMINDER_INTERVAL_HOURS = int(os.environ.get("REMINDER_INTERVAL_HOURS", "1"))  # Default: every 1 hour
+
 
 def get_user_name(user_id: str) -> str:
     """Get user's display name from Slack"""
@@ -369,14 +373,35 @@ def health_check():
 # Scheduler setup
 scheduler = BackgroundScheduler()
 
-# Schedule hourly reminders (every hour at minute 0)
+# Schedule hourly reminders (configurable via environment variables)
+# Default: Every hour at minute 0 (e.g., 9:00, 10:00, 11:00)
+REMINDER_MINUTE = int(os.environ.get("REMINDER_MINUTE", "0"))  # 0-59, default: 0
+REMINDER_INTERVAL_HOURS = float(os.environ.get("REMINDER_INTERVAL_HOURS", "1"))  # Default: every 1 hour
+
+# Create trigger based on interval
+if REMINDER_INTERVAL_HOURS == 1:
+    # Every hour at specific minute (e.g., every hour at :00, :15, :30)
+    trigger = CronTrigger(minute=REMINDER_MINUTE)
+    schedule_desc = f"every hour at minute {REMINDER_MINUTE}"
+elif REMINDER_INTERVAL_HOURS < 1:
+    # Less than 1 hour (e.g., every 30 minutes = 0.5 hours)
+    minutes_interval = int(REMINDER_INTERVAL_HOURS * 60)
+    trigger = CronTrigger(minute=f"*/{minutes_interval}")
+    schedule_desc = f"every {minutes_interval} minutes"
+elif REMINDER_INTERVAL_HOURS >= 1:
+    # Multiple hours (e.g., every 2 hours, every 4 hours)
+    hours_interval = int(REMINDER_INTERVAL_HOURS)
+    trigger = CronTrigger(minute=REMINDER_MINUTE, hour=f"*/{hours_interval}")
+    schedule_desc = f"every {hours_interval} hour(s) at minute {REMINDER_MINUTE}"
+
 scheduler.add_job(
     func=send_hourly_checkin_reminder,
-    trigger=CronTrigger(minute=0),  # Every hour at :00
+    trigger=trigger,
     id="hourly_reminder",
     name="Send hourly check-in reminder",
     replace_existing=True
 )
+logger.info(f"Hourly reminders scheduled: {schedule_desc}")
 
 # Schedule daily report (every day at 6 PM)
 def send_daily_report():
