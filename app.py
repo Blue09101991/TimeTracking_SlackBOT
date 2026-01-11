@@ -99,22 +99,42 @@ def generate_humorous_image() -> Optional[str]:
         prompt = random.choice(prompts)
         logger.info(f"Generating image with prompt: {prompt}")
         
-        # Use OpenAI client
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1024",
-            quality="standard",
-            n=1,
-        )
+        # Use OpenAI client - ensure clean initialization
+        # Remove any proxy-related environment variables that might interfere
+        import os
+        env_backup = {}
+        proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']
+        for var in proxy_vars:
+            if var in os.environ:
+                env_backup[var] = os.environ[var]
+                del os.environ[var]
         
-        image_url = response.data[0].url
-        logger.info(f"Generated image URL: {image_url}")
-        return image_url
+        try:
+            # Initialize OpenAI client with just the API key
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
+            
+            response = client.images.generate(
+                model="dall-e-3",
+                prompt=prompt,
+                size="1024x1024",
+                quality="standard",
+                n=1,
+            )
+            
+            image_url = response.data[0].url
+            logger.info(f"Generated image URL: {image_url}")
+            return image_url
+            
+        finally:
+            # Restore environment variables
+            for var, value in env_backup.items():
+                os.environ[var] = value
         
     except Exception as e:
         logger.error(f"Error generating image with OpenAI: {e}")
+        # Log full error details for debugging
+        import traceback
+        logger.debug(f"Full traceback: {traceback.format_exc()}")
         return None
 
 def send_hourly_checkin_reminder():

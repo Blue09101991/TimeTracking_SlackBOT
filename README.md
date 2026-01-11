@@ -293,6 +293,28 @@ slack-time-tracking-bot/
 
 ## Maintenance
 
+### Bot Control Commands
+
+**📖 See [BOT_CONTROL_COMMANDS.md](BOT_CONTROL_COMMANDS.md) for complete command reference**
+
+Quick commands:
+```bash
+# Stop bot
+sudo systemctl stop slack-time-bot
+
+# Start bot
+sudo systemctl start slack-time-bot
+
+# Restart bot
+sudo systemctl restart slack-time-bot
+
+# Check status
+sudo systemctl status slack-time-bot
+
+# View logs
+sudo journalctl -u slack-time-bot -f
+```
+
 ### View Logs
 
 ```bash
