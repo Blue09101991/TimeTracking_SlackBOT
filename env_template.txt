@@ -1,0 +1,18 @@
+# Copy this file to .env and fill in your values
+
+# Slack Bot Configuration
+SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_SIGNING_SECRET=your-signing-secret-here
+SLACK_CHANNEL_ID=C1234567890
+
+# Optional: Track specific users (comma-separated user IDs)
+# Leave empty to track all users in channel
+# Example: TRACKED_USER_IDS=U1234567890,U0987654321,U1122334455,U5566778899
+TRACKED_USER_IDS=
+
+# Server Configuration
+PORT=3000
+
+# Database Configuration
+DB_PATH=time_tracking.db
+
