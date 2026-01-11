@@ -15,6 +15,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 import pytz
+import openai
+import random
 
 from database import init_db, get_db_session, CheckIn, DailyReport
 
@@ -56,6 +58,9 @@ EST = pytz.timezone('US/Eastern')
 # Format: {message_ts: {user_id: True}}
 clicked_messages = {}
 
+# OpenAI configuration
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
 
 def get_user_name(user_id: str) -> str:
     """Get user's display name from Slack"""
@@ -72,8 +77,48 @@ def get_est_time() -> datetime:
     """Get current time in EST timezone"""
     return datetime.now(EST)
 
+def generate_humorous_image() -> Optional[str]:
+    """Generate a humorous image using OpenAI DALL-E for check-in reminders"""
+    if not OPENAI_API_KEY:
+        logger.debug("OpenAI API key not set, skipping image generation")
+        return None
+    
+    # Humorous prompts for work/check-in reminders
+    prompts = [
+        "A cute cartoon robot holding a clipboard and looking at a clock, office setting, friendly and humorous style",
+        "A funny cartoon character frantically checking in on a computer, comedic office scene, colorful and playful",
+        "A whimsical illustration of a clock with arms pointing at check-in time, surrounded by happy office workers, cartoon style",
+        "A humorous cartoon of a friendly robot reminding people to check in, modern office background, fun and cheerful",
+        "A playful illustration of a calendar with a checkmark, surrounded by happy emoji faces, bright and cheerful style",
+        "A cute cartoon of a clock wearing sunglasses and holding a 'check-in' sign, fun office environment, colorful",
+        "A funny cartoon scene of a robot doing a happy dance while holding a time card, office setting, playful style",
+        "A whimsical illustration of a clock tower with a friendly face, reminding people to check in, cartoon style"
+    ]
+    
+    try:
+        prompt = random.choice(prompts)
+        logger.info(f"Generating image with prompt: {prompt}")
+        
+        # Use OpenAI client
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        
+        image_url = response.data[0].url
+        logger.info(f"Generated image URL: {image_url}")
+        return image_url
+        
+    except Exception as e:
+        logger.error(f"Error generating image with OpenAI: {e}")
+        return None
+
 def send_hourly_checkin_reminder():
-    """Send hourly check-in reminder with interactive button"""
+    """Send hourly check-in reminder with interactive button and AI-generated humorous image"""
     if not CHANNEL_ID:
         logger.warning("Channel ID not set. Skipping reminder.")
         return
@@ -83,6 +128,9 @@ def send_hourly_checkin_reminder():
         time_str = est_now.strftime('%H:%M:%S')
         date_str = est_now.strftime('%Y-%m-%d')
         
+        # Generate humorous image
+        image_url = generate_humorous_image()
+        
         blocks = [
             {
                 "type": "header",
@@ -90,7 +138,18 @@ def send_hourly_checkin_reminder():
                     "type": "plain_text",
                     "text": "⏰ Hourly Check-In Reminder"
                 }
-            },
+            }
+        ]
+        
+        # Add image if generated successfully
+        if image_url:
+            blocks.append({
+                "type": "image",
+                "image_url": image_url,
+                "alt_text": "Funny check-in reminder image"
+            })
+        
+        blocks.extend([
             {
                 "type": "section",
                 "text": {
@@ -131,7 +190,7 @@ def send_hourly_checkin_reminder():
                     }
                 ]
             }
-        ]
+        ])
         
         response = slack_app.client.chat_postMessage(
             channel=CHANNEL_ID,
@@ -143,7 +202,7 @@ def send_hourly_checkin_reminder():
         message_ts = response["ts"]
         clicked_messages[message_ts] = {}
         
-        logger.info(f"Hourly check-in reminder sent at {time_str} EST (message_ts: {message_ts})")
+        logger.info(f"Hourly check-in reminder sent at {time_str} EST (message_ts: {message_ts})" + (f" with image" if image_url else ""))
     except SlackApiError as e:
         logger.error(f"Error sending reminder: {e}")
 
