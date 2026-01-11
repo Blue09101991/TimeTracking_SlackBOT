@@ -187,6 +187,20 @@ sudo journalctl -u slack-time-bot -f
    - `message.channels`
 5. Click **Save Changes**
 
+### 8b. Configure Interactivity (REQUIRED for Buttons!)
+
+**⚠️ IMPORTANT**: Without this step, buttons won't work!
+
+1. Go to your Slack App settings → **Interactivity & Shortcuts**
+2. Toggle **Interactivity** to **On**
+3. Set **Request URL** to: `http://your-vps-ip:3000/slack/events`
+   - **Same URL as Event Subscriptions!**
+   - Or use a domain: `https://yourdomain.com/slack/events`
+4. Slack will verify the URL (should show green checkmark ✅)
+5. Click **Save Changes**
+
+**Note**: Use the **same URL** (`/slack/events`) for both Event Subscriptions and Interactivity.
+
 ### 9. Add Slash Commands (Optional)
 
 1. Go to **Slash Commands** in the left sidebar

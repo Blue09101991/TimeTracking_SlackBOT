@@ -37,6 +37,9 @@ Use this checklist to ensure everything is configured correctly.
 - [ ] Bot Events added:
   - [ ] `app_mentions`
   - [ ] `message.channels`
+- [ ] **Interactivity enabled** (REQUIRED for buttons!)
+- [ ] Interactivity Request URL set: `http://YOUR_VPS_IP:3000/slack/events` (same URL!)
+- [ ] Interactivity URL verified (green checkmark ✅)
 - [ ] Slash Commands created (optional):
   - [ ] `/daily-report`
   - [ ] `/set-channel`

@@ -40,11 +40,21 @@ sudo systemctl status slack-time-bot
 
 ### 3. Configure Slack
 
+**Event Subscriptions:**
 1. Go to **Event Subscriptions** in Slack App settings
 2. Enable Events
 3. Request URL: `http://YOUR_VPS_IP:3000/slack/events`
 4. Add Bot Events: `app_mentions`, `message.channels`
 5. Save Changes
+
+**Interactivity (REQUIRED for Buttons!):**
+1. Go to **Interactivity & Shortcuts** in Slack App settings
+2. Toggle **Interactivity** to **On**
+3. Request URL: `http://YOUR_VPS_IP:3000/slack/events` (same as above!)
+4. Verify URL shows green checkmark ✅
+5. Save Changes
+
+⚠️ **Without Interactivity configured, buttons won't work!**
 
 ### 4. Invite Bot to Channel
 
