@@ -202,10 +202,12 @@ def generate_daily_report(date: datetime = None) -> Dict:
             CheckIn.timestamp <= utc_end
         ).order_by(CheckIn.timestamp).all()
         
-        # Group by user - only count "working" status
+        # Group by user and calculate actual working time from timestamps
         user_stats = {}
+        user_checkins = {}  # Store check-ins per user for time calculation
+        
         for checkin in checkins:
-            # Convert UTC timestamp back to EST for display
+            # Convert UTC timestamp back to EST
             utc_dt = pytz.UTC.localize(checkin.timestamp)
             est_dt = utc_dt.astimezone(EST)
             
@@ -213,18 +215,62 @@ def generate_daily_report(date: datetime = None) -> Dict:
                 user_stats[checkin.user_id] = {
                     "user_id": checkin.user_id,
                     "name": get_user_name(checkin.user_id),
-                    "working_count": 0,
                     "total_minutes": 0  # Total working minutes
                 }
+                user_checkins[checkin.user_id] = []
             
-            # Only count "working" status
-            if checkin.status == "working":
-                user_stats[checkin.user_id]["working_count"] += 1
-                # Assuming each check-in represents 1 minute of work (or adjust based on interval)
-                # For hourly reminders, each working check-in = 1 hour = 60 minutes
-                # For minute-based reminders, each working check-in = 1 minute
-                # We'll use 60 minutes per working check-in as default
-                user_stats[checkin.user_id]["total_minutes"] += 60
+            # Store check-in with EST timestamp
+            user_checkins[checkin.user_id].append({
+                "status": checkin.status,
+                "timestamp": est_dt
+            })
+        
+        # Calculate actual working time for each user
+        for user_id, checkin_list in user_checkins.items():
+            if not checkin_list:
+                continue
+            
+            # Sort check-ins by timestamp
+            checkin_list.sort(key=lambda x: x["timestamp"])
+            
+            total_working_seconds = 0
+            working_start = None
+            
+            # Process check-ins chronologically
+            for i, checkin in enumerate(checkin_list):
+                status = checkin["status"]
+                timestamp = checkin["timestamp"]
+                
+                if status == "working":
+                    # If already working, close previous period and start new one
+                    if working_start is not None:
+                        # Close previous working period at this timestamp
+                        time_diff = timestamp - working_start
+                        total_working_seconds += time_diff.total_seconds()
+                    # Start new working period
+                    working_start = timestamp
+                else:
+                    # End of working period (break or away)
+                    if working_start is not None:
+                        # Calculate time worked from start to this timestamp
+                        time_diff = timestamp - working_start
+                        total_working_seconds += time_diff.total_seconds()
+                        working_start = None
+            
+            # If still working at end of day (last check-in was "working")
+            if working_start is not None:
+                # Calculate time from last working check-in to end of day
+                # Use the last check-in timestamp as end point (conservative estimate)
+                # Or use end of day - but that might overestimate
+                # Better: use the last check-in time as end (they stopped working when they last checked in)
+                last_checkin_time = checkin_list[-1]["timestamp"]
+                if last_checkin_time > working_start:
+                    time_diff = last_checkin_time - working_start
+                    total_working_seconds += time_diff.total_seconds()
+            
+            # Convert seconds to minutes (round to nearest minute)
+            total_minutes = int(round(total_working_seconds / 60))
+            user_stats[user_id]["total_minutes"] = max(0, total_minutes)  # Ensure non-negative
         
         # Convert minutes to hours and minutes
         for user_id, stats in user_stats.items():
@@ -449,20 +495,40 @@ def handle_checkin(ack, body, respond, client):
         # Disable buttons in the original message by updating it
         try:
             # Get original message blocks
-            original_blocks = body["message"]["blocks"]
-            # Disable all buttons
+            original_blocks = body["message"]["blocks"].copy()
+            
+            # Create new blocks with disabled buttons
+            new_blocks = []
             for block in original_blocks:
                 if block.get("type") == "actions":
+                    # Create new actions block with disabled buttons
+                    new_elements = []
                     for element in block.get("elements", []):
                         if element.get("type") == "button":
-                            element["style"] = None  # Remove style
-                            element["value"] = "disabled"
+                            # Create disabled button (remove style field, set value)
+                            disabled_button = {
+                                "type": "button",
+                                "text": element.get("text", {}),
+                                "action_id": element.get("action_id", ""),
+                                "value": "disabled"
+                            }
+                            # Don't include style field at all for disabled buttons
+                            new_elements.append(disabled_button)
+                    
+                    if new_elements:
+                        new_blocks.append({
+                            "type": "actions",
+                            "elements": new_elements
+                        })
+                else:
+                    # Keep other blocks as-is
+                    new_blocks.append(block)
             
             # Update the message to disable buttons
             client.chat_update(
                 channel=channel_id,
                 ts=message_ts,
-                blocks=original_blocks,
+                blocks=new_blocks,
                 text="Hourly Check-In Reminder (Some users have checked in)"
             )
         except Exception as e:
