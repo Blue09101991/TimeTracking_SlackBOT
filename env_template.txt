@@ -45,3 +45,9 @@ REMINDER_INTERVAL_HOURS=1
 # If not set, reminders will work without images
 OPENAI_API_KEY=sk-your-openai-api-key-here
 
+# OpenAI Image Prompt (Optional - custom prompt for image generation)
+# If set, this prompt will be used for all image generations
+# If not set, a random prompt from default list will be used
+# Example: OPENAI_IMAGE_PROMPT=A funny cartoon robot reminding people to check in, office setting, colorful and cheerful
+OPENAI_IMAGE_PROMPT=
+

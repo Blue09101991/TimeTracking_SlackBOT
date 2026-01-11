@@ -60,6 +60,7 @@ clicked_messages = {}
 
 # OpenAI configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_IMAGE_PROMPT = os.environ.get("OPENAI_IMAGE_PROMPT", "")  # Custom prompt from env, or use random default
 
 
 def get_user_name(user_id: str) -> str:
@@ -83,21 +84,26 @@ def generate_humorous_image() -> Optional[str]:
         logger.debug("OpenAI API key not set, skipping image generation")
         return None
     
-    # Humorous prompts for work/check-in reminders
-    prompts = [
-        "A cute cartoon robot holding a clipboard and looking at a clock, office setting, friendly and humorous style",
-        "A funny cartoon character frantically checking in on a computer, comedic office scene, colorful and playful",
-        "A whimsical illustration of a clock with arms pointing at check-in time, surrounded by happy office workers, cartoon style",
-        "A humorous cartoon of a friendly robot reminding people to check in, modern office background, fun and cheerful",
-        "A playful illustration of a calendar with a checkmark, surrounded by happy emoji faces, bright and cheerful style",
-        "A cute cartoon of a clock wearing sunglasses and holding a 'check-in' sign, fun office environment, colorful",
-        "A funny cartoon scene of a robot doing a happy dance while holding a time card, office setting, playful style",
-        "A whimsical illustration of a clock tower with a friendly face, reminding people to check in, cartoon style"
-    ]
+    # Use custom prompt from env if provided, otherwise use random from default list
+    if OPENAI_IMAGE_PROMPT:
+        prompt = OPENAI_IMAGE_PROMPT
+        logger.info(f"Using custom prompt from env: {prompt}")
+    else:
+        # Default humorous prompts for work/check-in reminders
+        prompts = [
+            "A cute cartoon robot holding a clipboard and looking at a clock, office setting, friendly and humorous style",
+            "A funny cartoon character frantically checking in on a computer, comedic office scene, colorful and playful",
+            "A whimsical illustration of a clock with arms pointing at check-in time, surrounded by happy office workers, cartoon style",
+            "A humorous cartoon of a friendly robot reminding people to check in, modern office background, fun and cheerful",
+            "A playful illustration of a calendar with a checkmark, surrounded by happy emoji faces, bright and cheerful style",
+            "A cute cartoon of a clock wearing sunglasses and holding a 'check-in' sign, fun office environment, colorful",
+            "A funny cartoon scene of a robot doing a happy dance while holding a time card, office setting, playful style",
+            "A whimsical illustration of a clock tower with a friendly face, reminding people to check in, cartoon style"
+        ]
+        prompt = random.choice(prompts)
+        logger.info(f"Using random default prompt: {prompt}")
     
     try:
-        prompt = random.choice(prompts)
-        logger.info(f"Generating image with prompt: {prompt}")
         
         # Use OpenAI client - ensure clean initialization
         # Remove any proxy-related environment variables that might interfere
@@ -179,7 +185,7 @@ def send_hourly_checkin_reminder():
             },
             {
                 "type": "actions",
-                "elements": [
+                "elements": (lambda buttons: random.sample(buttons, len(buttons)))([
                     {
                         "type": "button",
                         "text": {
@@ -208,7 +214,7 @@ def send_hourly_checkin_reminder():
                         "action_id": "checkin_away",
                         "value": "away"
                     }
-                ]
+                ])
             }
         ])
         
