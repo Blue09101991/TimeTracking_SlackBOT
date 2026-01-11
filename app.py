@@ -6,7 +6,7 @@ Tracks working hours for team members with hourly check-ins and daily reports
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 from flask import Flask, request
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
@@ -14,6 +14,7 @@ from slack_sdk.errors import SlackApiError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
+import pytz
 
 from database import init_db, get_db_session, CheckIn, DailyReport
 
@@ -46,7 +47,14 @@ logger = logging.getLogger(__name__)
 CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
 
 # Store user IDs for tracking (4 members)
-TRACKED_USERS = os.environ.get("TRACKED_USER_IDS", "").split(",") if os.environ.get("TRACKED_USER_IDS") else []
+TRACKED_USERS = [uid.strip() for uid in os.environ.get("TRACKED_USER_IDS", "").split(",") if uid.strip()] if os.environ.get("TRACKED_USER_IDS") else []
+
+# Timezone configuration (EST)
+EST = pytz.timezone('US/Eastern')
+
+# Store message timestamps to prevent multiple clicks on same reminder
+# Format: {message_ts: {user_id: True}}
+clicked_messages = {}
 
 
 def get_user_name(user_id: str) -> str:
@@ -60,6 +68,10 @@ def get_user_name(user_id: str) -> str:
         return user_id
 
 
+def get_est_time() -> datetime:
+    """Get current time in EST timezone"""
+    return datetime.now(EST)
+
 def send_hourly_checkin_reminder():
     """Send hourly check-in reminder with interactive button"""
     if not CHANNEL_ID:
@@ -67,6 +79,10 @@ def send_hourly_checkin_reminder():
         return
     
     try:
+        est_now = get_est_time()
+        time_str = est_now.strftime('%H:%M:%S')
+        date_str = est_now.strftime('%Y-%m-%d')
+        
         blocks = [
             {
                 "type": "header",
@@ -79,7 +95,7 @@ def send_hourly_checkin_reminder():
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Time:* {datetime.now().strftime('%H:%M:%S')}\n\nPlease confirm your working status by clicking the button below:"
+                    "text": f"*Time (EST):* {time_str}\n*Date:* {date_str}\n\nPlease confirm your working status by clicking the button below:"
                 }
             },
             {
@@ -117,12 +133,17 @@ def send_hourly_checkin_reminder():
             }
         ]
         
-        slack_app.client.chat_postMessage(
+        response = slack_app.client.chat_postMessage(
             channel=CHANNEL_ID,
             blocks=blocks,
             text="Hourly Check-In Reminder"
         )
-        logger.info("Hourly check-in reminder sent")
+        
+        # Store message timestamp to track clicks
+        message_ts = response["ts"]
+        clicked_messages[message_ts] = {}
+        
+        logger.info(f"Hourly check-in reminder sent at {time_str} EST (message_ts: {message_ts})")
     except SlackApiError as e:
         logger.error(f"Error sending reminder: {e}")
 
@@ -130,18 +151,23 @@ def send_hourly_checkin_reminder():
 def record_checkin(user_id: str, status: str, timestamp: datetime = None):
     """Record a check-in to the database"""
     if timestamp is None:
-        timestamp = datetime.now()
+        timestamp = get_est_time()
+    
+    # Convert EST datetime to UTC for database storage
+    if timestamp.tzinfo is None:
+        timestamp = EST.localize(timestamp)
+    utc_timestamp = timestamp.astimezone(pytz.UTC).replace(tzinfo=None)
     
     session = get_db_session()
     try:
         checkin = CheckIn(
             user_id=user_id,
             status=status,
-            timestamp=timestamp
+            timestamp=utc_timestamp
         )
         session.add(checkin)
         session.commit()
-        logger.info(f"Recorded check-in: {user_id} - {status} at {timestamp}")
+        logger.info(f"Recorded check-in: {user_id} - {status} at {timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         return True
     except Exception as e:
         session.rollback()
@@ -152,49 +178,62 @@ def record_checkin(user_id: str, status: str, timestamp: datetime = None):
 
 
 def generate_daily_report(date: datetime = None) -> Dict:
-    """Generate daily report for all tracked users"""
+    """Generate daily report for all tracked users (EST timezone)"""
     if date is None:
-        date = datetime.now().date()
+        est_now = get_est_time()
+        date = est_now.date()
+    else:
+        # Convert to EST if needed
+        if isinstance(date, datetime):
+            date = date.date()
+        est_now = EST.localize(datetime.combine(date, datetime.min.time()))
+    
+    # Convert EST date range to UTC for database query
+    est_start = EST.localize(datetime.combine(date, datetime.min.time()))
+    est_end = EST.localize(datetime.combine(date, datetime.max.time()))
+    utc_start = est_start.astimezone(pytz.UTC).replace(tzinfo=None)
+    utc_end = est_end.astimezone(pytz.UTC).replace(tzinfo=None)
     
     session = get_db_session()
     try:
-        start_time = datetime.combine(date, datetime.min.time())
-        end_time = datetime.combine(date, datetime.max.time())
-        
-        # Get all check-ins for the day
+        # Get all check-ins for the day (in UTC)
         checkins = session.query(CheckIn).filter(
-            CheckIn.timestamp >= start_time,
-            CheckIn.timestamp <= end_time
+            CheckIn.timestamp >= utc_start,
+            CheckIn.timestamp <= utc_end
         ).order_by(CheckIn.timestamp).all()
         
-        # Group by user
+        # Group by user - only count "working" status
         user_stats = {}
         for checkin in checkins:
+            # Convert UTC timestamp back to EST for display
+            utc_dt = pytz.UTC.localize(checkin.timestamp)
+            est_dt = utc_dt.astimezone(EST)
+            
             if checkin.user_id not in user_stats:
                 user_stats[checkin.user_id] = {
+                    "user_id": checkin.user_id,
                     "name": get_user_name(checkin.user_id),
-                    "checkins": [],
                     "working_count": 0,
-                    "break_count": 0,
-                    "away_count": 0,
-                    "total_hours": 0
+                    "total_minutes": 0  # Total working minutes
                 }
             
-            user_stats[checkin.user_id]["checkins"].append({
-                "time": checkin.timestamp.strftime("%H:%M:%S"),
-                "status": checkin.status
-            })
-            
+            # Only count "working" status
             if checkin.status == "working":
                 user_stats[checkin.user_id]["working_count"] += 1
-            elif checkin.status == "break":
-                user_stats[checkin.user_id]["break_count"] += 1
-            elif checkin.status == "away":
-                user_stats[checkin.user_id]["away_count"] += 1
+                # Assuming each check-in represents 1 minute of work (or adjust based on interval)
+                # For hourly reminders, each working check-in = 1 hour = 60 minutes
+                # For minute-based reminders, each working check-in = 1 minute
+                # We'll use 60 minutes per working check-in as default
+                user_stats[checkin.user_id]["total_minutes"] += 60
         
-        # Calculate total working hours (assuming 1 hour per working check-in)
+        # Convert minutes to hours and minutes
         for user_id, stats in user_stats.items():
-            stats["total_hours"] = stats["working_count"]
+            total_minutes = stats["total_minutes"]
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            stats["hours"] = hours
+            stats["minutes"] = minutes
+            stats["total_minutes"] = total_minutes
         
         return {
             "date": date.strftime("%Y-%m-%d"),
@@ -208,14 +247,14 @@ def generate_daily_report(date: datetime = None) -> Dict:
 
 
 def format_daily_report(report: Dict) -> List[Dict]:
-    """Format daily report as Slack blocks"""
+    """Format daily report as Slack blocks - showing only working hours/minutes, ordered by TRACKED_USERS"""
     if not report or not report.get("users"):
         return [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*📊 Daily Report - {report.get('date', 'N/A')}*\n\nNo check-ins recorded for this day."
+                    "text": f"*📊 Daily Report - {report.get('date', 'N/A')} (EST)*\n\nNo check-ins recorded for this day."
                 }
             }
         ]
@@ -225,7 +264,7 @@ def format_daily_report(report: Dict) -> List[Dict]:
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📊 Daily Report - {report['date']}"
+                "text": f"📊 Daily Report - {report['date']} (EST)"
             }
         },
         {
@@ -233,37 +272,69 @@ def format_daily_report(report: Dict) -> List[Dict]:
         }
     ]
     
-    for user_id, stats in report["users"].items():
+    user_stats = report["users"]
+    
+    # Find min and max working times for emoji assignment
+    if user_stats:
+        min_minutes = min(stats.get("total_minutes", 0) for stats in user_stats.values())
+        max_minutes = max(stats.get("total_minutes", 0) for stats in user_stats.values())
+    else:
+        min_minutes = max_minutes = 0
+    
+    # Order users by TRACKED_USER_IDS from env, then by working time (descending)
+    ordered_users = []
+    
+    # First, add users in TRACKED_USER_IDS order
+    if TRACKED_USERS:
+        for user_id in TRACKED_USERS:
+            if user_id in user_stats:
+                ordered_users.append((user_id, user_stats[user_id]))
+        
+        # Add any other users not in TRACKED_USER_IDS
+        for user_id, stats in user_stats.items():
+            if user_id not in TRACKED_USERS:
+                ordered_users.append((user_id, stats))
+    else:
+        # If no TRACKED_USER_IDS, sort by working time (descending)
+        sorted_users = sorted(
+            user_stats.items(),
+            key=lambda x: x[1].get("total_minutes", 0),
+            reverse=True
+        )
+        ordered_users = sorted_users
+    
+    # Format each user's stats
+    for user_id, stats in ordered_users:
+        hours = stats.get("hours", 0)
+        minutes = stats.get("minutes", 0)
+        total_minutes = stats.get("total_minutes", 0)
+        
+        # Format time string
+        if hours > 0 and minutes > 0:
+            time_str = f"{hours}h {minutes}m"
+        elif hours > 0:
+            time_str = f"{hours}h"
+        elif minutes > 0:
+            time_str = f"{minutes}m"
+        else:
+            time_str = "0m"
+        
+        # Add emoji based on performance
+        emoji = ""
+        if total_minutes == min_minutes and min_minutes < max_minutes:
+            emoji = " 😴"  # Lazy emoji for least working time
+        elif total_minutes == max_minutes and max_minutes > 0:
+            emoji = " 🏆"  # Congratulation emoji for most working time
+        
         user_blocks = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*👤 {stats['name']}*\n"
-                           f"• Working Check-ins: {stats['working_count']}\n"
-                           f"• Break Check-ins: {stats['break_count']}\n"
-                           f"• Away Check-ins: {stats['away_count']}\n"
-                           f"• *Total Working Hours: {stats['total_hours']} hours*"
+                    "text": f"*👤 {stats['name']}*{emoji}\n*Working Time:* {time_str}"
                 }
             }
         ]
-        
-        # Add check-in details
-        if stats["checkins"]:
-            checkin_text = "\n".join([
-                f"• {c['time']} - {c['status'].title()}"
-                for c in stats["checkins"][:10]  # Show first 10
-            ])
-            if len(stats["checkins"]) > 10:
-                checkin_text += f"\n... and {len(stats['checkins']) - 10} more"
-            
-            user_blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Check-in History:*\n{checkin_text}"
-                }
-            })
         
         blocks.extend(user_blocks)
         blocks.append({"type": "divider"})
@@ -306,17 +377,35 @@ def handle_mention(event, say):
 @slack_app.action("checkin_break")
 @slack_app.action("checkin_away")
 def handle_checkin(ack, body, respond, client):
-    """Handle check-in button clicks"""
+    """Handle check-in button clicks - prevent multiple clicks on same reminder"""
     ack()
     
     user_id = body["user"]["id"]
     action_id = body["actions"][0]["action_id"]
     status = action_id.replace("checkin_", "")
     channel_id = body["channel"]["id"]
-    timestamp = datetime.now()
+    message_ts = body["message"]["ts"]  # Get message timestamp
+    
+    # Check if user already clicked on this reminder message
+    if message_ts in clicked_messages and user_id in clicked_messages[message_ts]:
+        respond(
+            text="⚠️ You've already checked in for this reminder!",
+            replace_original=False
+        )
+        return
+    
+    # Mark this user as having clicked this message
+    if message_ts not in clicked_messages:
+        clicked_messages[message_ts] = {}
+    clicked_messages[message_ts][user_id] = True
+    
+    # Get EST time
+    est_timestamp = get_est_time()
+    time_str = est_timestamp.strftime("%H:%M:%S")
+    date_str = est_timestamp.strftime("%Y-%m-%d")
     
     # Record check-in
-    success = record_checkin(user_id, status, timestamp)
+    success = record_checkin(user_id, status, est_timestamp)
     
     if success:
         user_name = get_user_name(user_id)
@@ -326,26 +415,15 @@ def handle_checkin(ack, body, respond, client):
             "away": "🏠"
         }.get(status, "📝")
         
-        # Format time
-        time_str = timestamp.strftime("%H:%M:%S")
+        # Create formatted message
+        status_text = {
+            "working": "Working",
+            "break": "On Break",
+            "away": "Away"
+        }.get(status, status.title())
         
         # Post status to channel for everyone to see
         try:
-            # Get channel name for better context
-            channel_name = ""
-            try:
-                channel_info = client.conversations_info(channel=channel_id)
-                channel_name = channel_info["channel"].get("name", "")
-            except:
-                pass
-            
-            # Create formatted message
-            status_text = {
-                "working": "Working",
-                "break": "On Break",
-                "away": "Away"
-            }.get(status, status.title())
-            
             client.chat_postMessage(
                 channel=channel_id,
                 blocks=[
@@ -353,28 +431,52 @@ def handle_checkin(ack, body, respond, client):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"{status_emoji} *{user_name}* - *{status_text}*\n🕐 `{time_str}`"
+                            "text": f"{status_emoji} *{user_name}* - *{status_text}*\n🕐 `{time_str} EST` | 📅 `{date_str}`"
                         }
                     }
                 ],
-                text=f"{status_emoji} {user_name} - {status_text} at {time_str}"
+                text=f"{status_emoji} {user_name} - {status_text} at {time_str} EST"
             )
-            logger.info(f"Posted check-in to channel: {user_name} - {status_text} at {time_str}")
+            logger.info(f"Posted check-in to channel: {user_name} - {status_text} at {time_str} EST")
         except SlackApiError as e:
             logger.error(f"Error posting check-in to channel: {e}")
-            # Still respond to user even if channel post fails
             respond(
                 text=f"{status_emoji} Check-in recorded, but failed to post to channel. Error: {e}",
                 replace_original=False
             )
             return
         
-        # Also respond to the user (ephemeral message)
+        # Disable buttons in the original message by updating it
+        try:
+            # Get original message blocks
+            original_blocks = body["message"]["blocks"]
+            # Disable all buttons
+            for block in original_blocks:
+                if block.get("type") == "actions":
+                    for element in block.get("elements", []):
+                        if element.get("type") == "button":
+                            element["style"] = None  # Remove style
+                            element["value"] = "disabled"
+            
+            # Update the message to disable buttons
+            client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                blocks=original_blocks,
+                text="Hourly Check-In Reminder (Some users have checked in)"
+            )
+        except Exception as e:
+            logger.warning(f"Could not update message to disable buttons: {e}")
+        
+        # Respond to the user (ephemeral message)
         respond(
             text=f"{status_emoji} Your check-in has been recorded and posted to the channel!",
             replace_original=False
         )
     else:
+        # Remove from clicked_messages if recording failed
+        if message_ts in clicked_messages and user_id in clicked_messages[message_ts]:
+            del clicked_messages[message_ts][user_id]
         respond(
             text="❌ Error recording check-in. Please try again.",
             replace_original=False
@@ -436,15 +538,15 @@ except (ValueError, TypeError):
 
 # If REMINDER_INTERVAL_MINUTES is set, use it; otherwise use REMINDER_INTERVAL_HOURS
 if REMINDER_INTERVAL_MINUTES:
-    # Minute-based interval (e.g., every 1 minute, every 5 minutes, every 30 minutes)
+    # Minute-based interval (e.g., every 1 minute, every 5 minutes, every 30 minutes) - EST timezone
     if REMINDER_INTERVAL_MINUTES == 1:
-        trigger = CronTrigger(minute="*")  # Every minute
-        schedule_desc = "every 1 minute"
+        trigger = CronTrigger(minute="*", timezone=EST)  # Every minute in EST
+        schedule_desc = "every 1 minute (EST)"
     else:
-        trigger = CronTrigger(minute=f"*/{REMINDER_INTERVAL_MINUTES}")
-        schedule_desc = f"every {REMINDER_INTERVAL_MINUTES} minutes"
+        trigger = CronTrigger(minute=f"*/{REMINDER_INTERVAL_MINUTES}", timezone=EST)
+        schedule_desc = f"every {REMINDER_INTERVAL_MINUTES} minutes (EST)"
 else:
-    # Hour-based interval (original behavior)
+    # Hour-based interval (original behavior) - EST timezone
     try:
         REMINDER_MINUTE = int(os.environ.get("REMINDER_MINUTE", "0"))
         if REMINDER_MINUTE < 0 or REMINDER_MINUTE > 59:
@@ -463,36 +565,36 @@ else:
         logger.warning("Invalid REMINDER_INTERVAL_HOURS, using default 1")
         REMINDER_INTERVAL_HOURS = 1
 
-    # Create trigger based on hour interval
+    # Create trigger based on hour interval (EST timezone)
     try:
         if REMINDER_INTERVAL_HOURS == 1:
             # Every hour at specific minute (e.g., every hour at :00, :15, :30)
-            trigger = CronTrigger(minute=REMINDER_MINUTE)
-            schedule_desc = f"every hour at minute {REMINDER_MINUTE}"
+            trigger = CronTrigger(minute=REMINDER_MINUTE, timezone=EST)
+            schedule_desc = f"every hour at minute {REMINDER_MINUTE} (EST)"
         elif REMINDER_INTERVAL_HOURS < 1:
             # Less than 1 hour (e.g., every 30 minutes = 0.5 hours)
             minutes_interval = int(REMINDER_INTERVAL_HOURS * 60)
             if minutes_interval <= 0:
                 logger.warning(f"Calculated minutes_interval ({minutes_interval}) is invalid, using default: every hour at :00")
-                trigger = CronTrigger(minute=0)
-                schedule_desc = "every hour at minute 0"
+                trigger = CronTrigger(minute=0, timezone=EST)
+                schedule_desc = "every hour at minute 0 (EST)"
             else:
-                trigger = CronTrigger(minute=f"*/{minutes_interval}")
-                schedule_desc = f"every {minutes_interval} minutes"
+                trigger = CronTrigger(minute=f"*/{minutes_interval}", timezone=EST)
+                schedule_desc = f"every {minutes_interval} minutes (EST)"
         else:
             # Multiple hours (e.g., every 2 hours, every 4 hours)
             hours_interval = int(REMINDER_INTERVAL_HOURS)
             if hours_interval <= 0:
                 logger.warning(f"Calculated hours_interval ({hours_interval}) is invalid, using default: every hour at :00")
-                trigger = CronTrigger(minute=REMINDER_MINUTE)
-                schedule_desc = f"every hour at minute {REMINDER_MINUTE}"
+                trigger = CronTrigger(minute=REMINDER_MINUTE, timezone=EST)
+                schedule_desc = f"every hour at minute {REMINDER_MINUTE} (EST)"
             else:
-                trigger = CronTrigger(minute=REMINDER_MINUTE, hour=f"*/{hours_interval}")
-                schedule_desc = f"every {hours_interval} hour(s) at minute {REMINDER_MINUTE}"
+                trigger = CronTrigger(minute=REMINDER_MINUTE, hour=f"*/{hours_interval}", timezone=EST)
+                schedule_desc = f"every {hours_interval} hour(s) at minute {REMINDER_MINUTE} (EST)"
     except Exception as e:
         logger.error(f"Error creating CronTrigger: {e}. Using default: every hour at :00")
-        trigger = CronTrigger(minute=0)
-        schedule_desc = "every hour at minute 0"
+        trigger = CronTrigger(minute=0, timezone=EST)
+        schedule_desc = "every hour at minute 0 (EST)"
 
 scheduler.add_job(
     func=send_hourly_checkin_reminder,
@@ -503,7 +605,7 @@ scheduler.add_job(
 )
 logger.info(f"Hourly reminders scheduled: {schedule_desc}")
 
-# Schedule daily report (every day at 6 PM)
+# Schedule daily report (every day at 6 PM EST)
 def send_daily_report():
     """Send daily report to channel"""
     if not CHANNEL_ID:
@@ -521,9 +623,10 @@ def send_daily_report():
     except Exception as e:
         logger.error(f"Error sending daily report: {e}")
 
+# Schedule daily report at 6 PM EST
 scheduler.add_job(
     func=send_daily_report,
-    trigger=CronTrigger(hour=18, minute=0),  # 6 PM daily
+    trigger=CronTrigger(hour=18, minute=0, timezone=EST),  # 6 PM EST daily
     id="daily_report",
     name="Send daily report",
     replace_existing=True
