@@ -305,16 +305,18 @@ def handle_mention(event, say):
 @slack_app.action("checkin_working")
 @slack_app.action("checkin_break")
 @slack_app.action("checkin_away")
-def handle_checkin(ack, body, respond):
+def handle_checkin(ack, body, respond, client):
     """Handle check-in button clicks"""
     ack()
     
     user_id = body["user"]["id"]
     action_id = body["actions"][0]["action_id"]
     status = action_id.replace("checkin_", "")
+    channel_id = body["channel"]["id"]
+    timestamp = datetime.now()
     
     # Record check-in
-    success = record_checkin(user_id, status)
+    success = record_checkin(user_id, status, timestamp)
     
     if success:
         user_name = get_user_name(user_id)
@@ -324,8 +326,52 @@ def handle_checkin(ack, body, respond):
             "away": "🏠"
         }.get(status, "📝")
         
+        # Format time
+        time_str = timestamp.strftime("%H:%M:%S")
+        
+        # Post status to channel for everyone to see
+        try:
+            # Get channel name for better context
+            channel_name = ""
+            try:
+                channel_info = client.conversations_info(channel=channel_id)
+                channel_name = channel_info["channel"].get("name", "")
+            except:
+                pass
+            
+            # Create formatted message
+            status_text = {
+                "working": "Working",
+                "break": "On Break",
+                "away": "Away"
+            }.get(status, status.title())
+            
+            client.chat_postMessage(
+                channel=channel_id,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"{status_emoji} *{user_name}* - *{status_text}*\n🕐 `{time_str}`"
+                        }
+                    }
+                ],
+                text=f"{status_emoji} {user_name} - {status_text} at {time_str}"
+            )
+            logger.info(f"Posted check-in to channel: {user_name} - {status_text} at {time_str}")
+        except SlackApiError as e:
+            logger.error(f"Error posting check-in to channel: {e}")
+            # Still respond to user even if channel post fails
+            respond(
+                text=f"{status_emoji} Check-in recorded, but failed to post to channel. Error: {e}",
+                replace_original=False
+            )
+            return
+        
+        # Also respond to the user (ephemeral message)
         respond(
-            text=f"{status_emoji} Check-in recorded: {user_name} - {status.title()}",
+            text=f"{status_emoji} Your check-in has been recorded and posted to the channel!",
             replace_original=False
         )
     else:
