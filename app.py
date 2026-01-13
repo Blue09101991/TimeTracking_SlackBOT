@@ -7,16 +7,20 @@ import os
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from flask import Flask, request
+from flask import Flask, request, send_from_directory
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from slack_sdk.errors import SlackApiError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from dotenv import load_dotenv
 import pytz
 import openai
 import random
+import requests
+import uuid
+from pathlib import Path
 
 from database import init_db, get_db_session, CheckIn, DailyReport
 
@@ -58,6 +62,29 @@ EST = pytz.timezone('US/Eastern')
 # Format: {message_ts: {user_id: True}}
 clicked_messages = {}
 
+# Store message info for timeout disabling
+# Format: {message_ts: {"channel_id": str, "blocks": list}}
+message_info = {}
+
+# Button timeout configuration (in minutes)
+try:
+    BUTTON_TIMEOUT_MINUTES = int(os.environ.get("BUTTON_TIMEOUT_MINUTES", "5"))
+    if BUTTON_TIMEOUT_MINUTES < 1:
+        BUTTON_TIMEOUT_MINUTES = 5
+        logger.warning(f"Invalid BUTTON_TIMEOUT_MINUTES, using default 5")
+except (ValueError, TypeError):
+    BUTTON_TIMEOUT_MINUTES = 5
+    logger.warning("Invalid BUTTON_TIMEOUT_MINUTES, using default 5")
+
+# Image configuration
+IMAGE_ENABLED = os.environ.get("IMAGE_ENABLED", "true").lower() == "true"
+IMAGES_DIR = Path(os.environ.get("IMAGES_DIR", "images"))
+IMAGES_DIR.mkdir(exist_ok=True)  # Create images directory if it doesn't exist
+
+# Server configuration for image URLs
+SERVER_URL = os.environ.get("SERVER_URL", "")  # e.g., http://your-vps-ip:3000 or https://yourdomain.com
+PORT = int(os.environ.get("PORT", 3000))
+
 # OpenAI configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_IMAGE_PROMPT = os.environ.get("OPENAI_IMAGE_PROMPT", "")  # Custom prompt from env, or use random default
@@ -78,8 +105,30 @@ def get_est_time() -> datetime:
     """Get current time in EST timezone"""
     return datetime.now(EST)
 
+def download_image_from_url(image_url: str, filename: str) -> Optional[str]:
+    """Download image from URL and save to local folder"""
+    try:
+        response = requests.get(image_url, timeout=30)
+        response.raise_for_status()
+        
+        # Save image to local folder
+        filepath = IMAGES_DIR / filename
+        with open(filepath, 'wb') as f:
+            f.write(response.content)
+        
+        logger.info(f"Downloaded image to {filepath}")
+        return str(filepath)
+    except Exception as e:
+        logger.error(f"Error downloading image from {image_url}: {e}")
+        return None
+
 def generate_humorous_image() -> Optional[str]:
-    """Generate a humorous image using OpenAI DALL-E for check-in reminders"""
+    """Generate a humorous image using OpenAI DALL-E for check-in reminders, download and return local URL"""
+    # Check if images are enabled
+    if not IMAGE_ENABLED:
+        logger.debug("Images are disabled in configuration")
+        return None
+    
     if not OPENAI_API_KEY:
         logger.debug("OpenAI API key not set, skipping image generation")
         return None
@@ -127,9 +176,29 @@ def generate_humorous_image() -> Optional[str]:
                 n=1,
             )
             
-            image_url = response.data[0].url
-            logger.info(f"Generated image URL: {image_url}")
-            return image_url
+            openai_image_url = response.data[0].url
+            logger.info(f"Generated image URL from OpenAI: {openai_image_url}")
+            
+            # Download image to local folder
+            image_filename = f"{uuid.uuid4()}.png"
+            local_filepath = download_image_from_url(openai_image_url, image_filename)
+            
+            if not local_filepath:
+                logger.warning("Failed to download image, using OpenAI URL directly")
+                return openai_image_url
+            
+            # Generate local URL for the image
+            if SERVER_URL:
+                # Use configured server URL
+                local_image_url = f"{SERVER_URL}/images/{image_filename}"
+            else:
+                # Try to construct from request (if available) or use default
+                # For scheduled jobs, we'll need SERVER_URL set in env
+                local_image_url = f"http://localhost:{PORT}/images/{image_filename}"
+                logger.warning(f"SERVER_URL not set in env, using localhost. Set SERVER_URL for production.")
+            
+            logger.info(f"Image available at local URL: {local_image_url}")
+            return local_image_url
             
         finally:
             # Restore environment variables
@@ -142,6 +211,78 @@ def generate_humorous_image() -> Optional[str]:
         import traceback
         logger.debug(f"Full traceback: {traceback.format_exc()}")
         return None
+
+def disable_buttons_after_timeout(message_ts: str, channel_id: str, original_blocks: List[Dict]):
+    """Disable all buttons in a reminder message after timeout"""
+    try:
+        # Create new blocks with disabled buttons
+        new_blocks = []
+        for block in original_blocks:
+            if block.get("type") == "actions":
+                # Create new actions block with disabled buttons
+                new_elements = []
+                for element in block.get("elements", []):
+                    if element.get("type") == "button":
+                        # Create disabled button (remove style field, set value)
+                        disabled_button = {
+                            "type": "button",
+                            "text": element.get("text", {}),
+                            "action_id": element.get("action_id", ""),
+                            "value": "disabled"
+                        }
+                        # Don't include style field at all for disabled buttons
+                        new_elements.append(disabled_button)
+                
+                if new_elements:
+                    new_blocks.append({
+                        "type": "actions",
+                        "elements": new_elements
+                    })
+            else:
+                # Keep other blocks as-is
+                new_blocks.append(block)
+        
+        # Update the message to disable buttons
+        slack_app.client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=new_blocks,
+            text="Hourly Check-In Reminder (Check-in period expired)"
+        )
+        
+        # Remove from tracking
+        if message_ts in message_info:
+            del message_info[message_ts]
+        if message_ts in clicked_messages:
+            del clicked_messages[message_ts]
+        
+        logger.info(f"Disabled buttons for message {message_ts} after {BUTTON_TIMEOUT_MINUTES} minutes timeout")
+    except SlackApiError as e:
+        if e.response.get("error") == "message_not_found":
+            logger.debug(f"Message {message_ts} not found (may have been deleted)")
+        else:
+            logger.error(f"Error disabling buttons for message {message_ts}: {e}")
+    except Exception as e:
+        logger.error(f"Error disabling buttons for message {message_ts}: {e}")
+
+def schedule_button_timeout(message_ts: str, channel_id: str, blocks: List[Dict]):
+    """Schedule a job to disable buttons after timeout"""
+    try:
+        # Calculate when to disable (now + timeout minutes)
+        disable_time = datetime.now() + timedelta(minutes=BUTTON_TIMEOUT_MINUTES)
+        
+        # Schedule one-time job to disable buttons
+        scheduler.add_job(
+            func=disable_buttons_after_timeout,
+            args=[message_ts, channel_id, blocks],
+            trigger='date',
+            run_date=disable_time,
+            id=f"disable_buttons_{message_ts}",
+            replace_existing=True
+        )
+        logger.debug(f"Scheduled button disable for message {message_ts} at {disable_time}")
+    except Exception as e:
+        logger.error(f"Error scheduling button timeout for message {message_ts}: {e}")
 
 def send_hourly_checkin_reminder():
     """Send hourly check-in reminder with interactive button and AI-generated humorous image"""
@@ -228,7 +369,16 @@ def send_hourly_checkin_reminder():
         message_ts = response["ts"]
         clicked_messages[message_ts] = {}
         
-        logger.info(f"Hourly check-in reminder sent at {time_str} EST (message_ts: {message_ts})" + (f" with image" if image_url else ""))
+        # Store message info for timeout disabling
+        message_info[message_ts] = {
+            "channel_id": CHANNEL_ID,
+            "blocks": blocks.copy()  # Store original blocks
+        }
+        
+        # Schedule button disabling after timeout
+        schedule_button_timeout(message_ts, CHANNEL_ID, blocks)
+        
+        logger.info(f"Hourly check-in reminder sent at {time_str} EST (message_ts: {message_ts})" + (f" with image" if image_url else "") + f", buttons will disable after {BUTTON_TIMEOUT_MINUTES} minutes")
     except SlackApiError as e:
         logger.error(f"Error sending reminder: {e}")
 
@@ -663,6 +813,16 @@ def slack_events():
 def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+
+@flask_app.route("/images/<filename>", methods=["GET"])
+def serve_image(filename):
+    """Serve images from local folder"""
+    try:
+        return send_from_directory(IMAGES_DIR, filename)
+    except Exception as e:
+        logger.error(f"Error serving image {filename}: {e}")
+        return {"error": "Image not found"}, 404
 
 
 # Scheduler setup

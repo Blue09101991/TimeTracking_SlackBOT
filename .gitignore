@@ -17,6 +17,13 @@ ENV/
 *.sqlite
 *.sqlite3
 
+# Images
+images/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
 # IDE
 .vscode/
 .idea/

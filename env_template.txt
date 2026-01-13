@@ -40,6 +40,19 @@ REMINDER_MINUTE=0
 #            4 = every 4 hours
 REMINDER_INTERVAL_HOURS=1
 
+# Image Configuration
+# IMAGE_ENABLED: Enable or disable image generation in reminders
+#   true = images will be generated and shown (default)
+#   false = no images will be generated
+IMAGE_ENABLED=true
+
+# SERVER_URL: Your server's public URL (required for images to work)
+#   Examples: http://192.168.1.100:3000
+#             https://yourdomain.com
+#             http://your-vps-ip:3000
+#   This is used to generate image URLs that Slack can access
+SERVER_URL=http://your-vps-ip:3000
+
 # OpenAI Configuration (Optional - for humorous images in reminders)
 # Get your API key from: https://platform.openai.com/api-keys
 # If not set, reminders will work without images
@@ -50,4 +63,12 @@ OPENAI_API_KEY=sk-your-openai-api-key-here
 # If not set, a random prompt from default list will be used
 # Example: OPENAI_IMAGE_PROMPT=A funny cartoon robot reminding people to check in, office setting, colorful and cheerful
 OPENAI_IMAGE_PROMPT=
+
+# Button Timeout Configuration
+# BUTTON_TIMEOUT_MINUTES: How long buttons remain active after reminder is sent (in minutes)
+#   After this time, all buttons will be automatically disabled
+#   Examples: 5 = buttons disabled after 5 minutes (default)
+#            10 = buttons disabled after 10 minutes
+#            3 = buttons disabled after 3 minutes
+BUTTON_TIMEOUT_MINUTES=5
 
