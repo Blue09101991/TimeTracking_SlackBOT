@@ -68,13 +68,16 @@ message_info = {}
 
 # Button timeout configuration (in minutes)
 try:
-    BUTTON_TIMEOUT_MINUTES = int(os.environ.get("BUTTON_TIMEOUT_MINUTES", "5"))
+    BUTTON_TIMEOUT_MINUTES = int(os.environ.get("BUTTON_TIMEOUT_MINUTES", "3"))
     if BUTTON_TIMEOUT_MINUTES < 1:
-        BUTTON_TIMEOUT_MINUTES = 5
-        logger.warning(f"Invalid BUTTON_TIMEOUT_MINUTES, using default 5")
+        BUTTON_TIMEOUT_MINUTES = 3
+        logger.warning(f"Invalid BUTTON_TIMEOUT_MINUTES, using default 3")
 except (ValueError, TypeError):
-    BUTTON_TIMEOUT_MINUTES = 5
-    logger.warning("Invalid BUTTON_TIMEOUT_MINUTES, using default 5")
+    BUTTON_TIMEOUT_MINUTES = 3
+    logger.warning("Invalid BUTTON_TIMEOUT_MINUTES, using default 3")
+
+# Store disabled messages (messages where buttons are already disabled)
+disabled_messages = set()
 
 # Image configuration
 IMAGE_ENABLED = os.environ.get("IMAGE_ENABLED", "true").lower() == "true"
@@ -254,6 +257,10 @@ def generate_humorous_image() -> Optional[str]:
 def disable_buttons_after_timeout(message_ts: str, channel_id: str, original_blocks: List[Dict]):
     """Disable all buttons in a reminder message after timeout"""
     try:
+        # Mark message as disabled FIRST (before API call) to prevent any new clicks
+        disabled_messages.add(message_ts)
+        logger.info(f"Marked message {message_ts} as disabled")
+        
         # Create new blocks with disabled buttons
         new_blocks = []
         for block in original_blocks:
@@ -698,26 +705,37 @@ def handle_mention(event, say):
 @slack_app.action("checkin_away")
 def handle_checkin(ack, body, respond, client):
     """Handle check-in button clicks - prevent multiple clicks on same reminder"""
-    ack()
-    
     user_id = body["user"]["id"]
     action_id = body["actions"][0]["action_id"]
     status = action_id.replace("checkin_", "")
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]  # Get message timestamp
     
-    # Check if user already clicked on this reminder message
+    # CRITICAL: Check if buttons are disabled (timeout expired) BEFORE ack()
+    if message_ts in disabled_messages:
+        ack()
+        respond(
+            text="⏰ Check-in period has expired. Please wait for the next reminder.",
+            replace_original=False
+        )
+        return
+    
+    # CRITICAL: Check if user already clicked on this reminder message BEFORE ack()
     if message_ts in clicked_messages and user_id in clicked_messages[message_ts]:
+        ack()
         respond(
             text="⚠️ You've already checked in for this reminder!",
             replace_original=False
         )
         return
     
-    # Mark this user as having clicked this message
+    # Mark this user as having clicked this message IMMEDIATELY (before processing)
     if message_ts not in clicked_messages:
         clicked_messages[message_ts] = {}
     clicked_messages[message_ts][user_id] = True
+    
+    # Now acknowledge the action
+    ack()
     
     # Get EST time
     est_timestamp = get_est_time()
@@ -766,47 +784,8 @@ def handle_checkin(ack, body, respond, client):
             )
             return
         
-        # Disable buttons in the original message by updating it
-        try:
-            # Get original message blocks
-            original_blocks = body["message"]["blocks"].copy()
-            
-            # Create new blocks with disabled buttons
-            new_blocks = []
-            for block in original_blocks:
-                if block.get("type") == "actions":
-                    # Create new actions block with disabled buttons
-                    new_elements = []
-                    for element in block.get("elements", []):
-                        if element.get("type") == "button":
-                            # Create disabled button (remove style field, set value)
-                            disabled_button = {
-                                "type": "button",
-                                "text": element.get("text", {}),
-                                "action_id": element.get("action_id", ""),
-                                "value": "disabled"
-                            }
-                            # Don't include style field at all for disabled buttons
-                            new_elements.append(disabled_button)
-                    
-                    if new_elements:
-                        new_blocks.append({
-                            "type": "actions",
-                            "elements": new_elements
-                        })
-                else:
-                    # Keep other blocks as-is
-                    new_blocks.append(block)
-            
-            # Update the message to disable buttons
-            client.chat_update(
-                channel=channel_id,
-                ts=message_ts,
-                blocks=new_blocks,
-                text="Hourly Check-In Reminder (Some users have checked in)"
-            )
-        except Exception as e:
-            logger.warning(f"Could not update message to disable buttons: {e}")
+        # Note: Buttons will be automatically disabled after BUTTON_TIMEOUT_MINUTES
+        # No need to disable immediately after one user clicks
         
         # Respond to the user (ephemeral message)
         respond(
@@ -814,7 +793,7 @@ def handle_checkin(ack, body, respond, client):
             replace_original=False
         )
     else:
-        # Remove from clicked_messages if recording failed
+        # Remove from clicked_messages if recording failed (allow retry)
         if message_ts in clicked_messages and user_id in clicked_messages[message_ts]:
             del clicked_messages[message_ts][user_id]
         respond(

@@ -67,8 +67,8 @@ OPENAI_IMAGE_PROMPT=
 # Button Timeout Configuration
 # BUTTON_TIMEOUT_MINUTES: How long buttons remain active after reminder is sent (in minutes)
 #   After this time, all buttons will be automatically disabled
-#   Examples: 5 = buttons disabled after 5 minutes (default)
+#   Examples: 3 = buttons disabled after 3 minutes (default)
+#            5 = buttons disabled after 5 minutes
 #            10 = buttons disabled after 10 minutes
-#            3 = buttons disabled after 3 minutes
-BUTTON_TIMEOUT_MINUTES=5
+BUTTON_TIMEOUT_MINUTES=3
 
