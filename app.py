@@ -108,18 +108,48 @@ def get_est_time() -> datetime:
 def download_image_from_url(image_url: str, filename: str) -> Optional[str]:
     """Download image from URL and save to local folder"""
     try:
-        response = requests.get(image_url, timeout=30)
+        logger.info(f"Starting download from {image_url} to {filename}")
+        
+        # Download image
+        response = requests.get(image_url, timeout=30, stream=True)
         response.raise_for_status()
         
-        # Save image to local folder
+        # Get file path
         filepath = IMAGES_DIR / filename
-        with open(filepath, 'wb') as f:
-            f.write(response.content)
+        filepath_abs = filepath.resolve()
         
-        logger.info(f"Downloaded image to {filepath}")
-        return str(filepath)
+        # Ensure directory exists
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Save image to local folder
+        with open(filepath_abs, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Verify file was saved
+        if not filepath_abs.exists():
+            logger.error(f"File was not created at {filepath_abs}")
+            return None
+        
+        file_size = filepath_abs.stat().st_size
+        if file_size == 0:
+            logger.error(f"Downloaded file is empty: {filepath_abs}")
+            return None
+        
+        logger.info(f"Successfully downloaded image to {filepath_abs} ({file_size} bytes)")
+        return str(filepath_abs)
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error downloading image from {image_url}: {e}")
+        return None
+    except IOError as e:
+        logger.error(f"File I/O error saving image to {filename}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error downloading image from {image_url}: {e}")
+        logger.error(f"Unexpected error downloading image from {image_url}: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
         return None
 
 def generate_humorous_image() -> Optional[str]:
@@ -179,25 +209,34 @@ def generate_humorous_image() -> Optional[str]:
             openai_image_url = response.data[0].url
             logger.info(f"Generated image URL from OpenAI: {openai_image_url}")
             
-            # Download image to local folder
+            # Download image to local folder - MUST download before posting
             image_filename = f"{uuid.uuid4()}.png"
+            logger.info(f"Downloading image from OpenAI to local folder: {image_filename}")
+            
             local_filepath = download_image_from_url(openai_image_url, image_filename)
             
             if not local_filepath:
-                logger.warning("Failed to download image, using OpenAI URL directly")
-                return openai_image_url
+                logger.error("CRITICAL: Failed to download image from OpenAI. Cannot proceed without local copy.")
+                return None  # Don't use OpenAI URL - return None to skip image
             
-            # Generate local URL for the image
-            if SERVER_URL:
-                # Use configured server URL
-                local_image_url = f"{SERVER_URL}/images/{image_filename}"
-            else:
-                # Try to construct from request (if available) or use default
-                # For scheduled jobs, we'll need SERVER_URL set in env
-                local_image_url = f"http://localhost:{PORT}/images/{image_filename}"
-                logger.warning(f"SERVER_URL not set in env, using localhost. Set SERVER_URL for production.")
+            # Verify file was saved
+            if not os.path.exists(local_filepath):
+                logger.error(f"CRITICAL: Image file not found at {local_filepath} after download")
+                return None
             
-            logger.info(f"Image available at local URL: {local_image_url}")
+            file_size = os.path.getsize(local_filepath)
+            logger.info(f"Image saved successfully: {local_filepath} ({file_size} bytes)")
+            
+            # Generate local URL for the image - MUST use SERVER_URL
+            if not SERVER_URL:
+                logger.error("CRITICAL: SERVER_URL not set in .env file. Cannot generate image URL for Slack.")
+                logger.error("Please set SERVER_URL in .env file (e.g., SERVER_URL=http://your-vps-ip:3000)")
+                return None
+            
+            # Always use SERVER_URL to generate the local image URL
+            local_image_url = f"{SERVER_URL.rstrip('/')}/images/{image_filename}"
+            logger.info(f"Image will be served from local URL: {local_image_url}")
+            
             return local_image_url
             
         finally:
