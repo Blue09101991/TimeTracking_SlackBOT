@@ -22,8 +22,10 @@ TIMETRACKING_ENABLED=true
 #   false = do nothing (default)
 # Notes:
 # - Requires Slack app event subscription: member_left_channel
-# - Requires bot scopes: conversations:read, conversations:write
+# - For PRIVATE channels: Requires bot scopes: groups:read, groups:write.invites
+# - For PUBLIC channels: Requires bot scopes: channels:read, channels:write.invites
 # - Bot must be a member of the channel
+# - Search for "groups:" in scope picker for private channels
 AUTO_REINVITE_ENABLED=false
 
 # Delay before re-inviting (seconds). Helps avoid race conditions.

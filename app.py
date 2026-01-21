@@ -712,52 +712,130 @@ def handle_mention(event, say):
 
 
 @slack_app.event("member_left_channel")
-def handle_member_left_channel(event, logger, client):
+def handle_member_left_channel(event, client):
     """
     If a tracked user leaves the configured channel, invite them back.
     Notes:
     - Works only if Slack sends this event for your channel and the bot is a member.
-    - Requires Slack scopes: conversations:read + conversations:write
+    - For PRIVATE channels: Requires scopes: groups:read + groups:write.invites
+    - For PUBLIC channels: Requires scopes: channels:read + channels:write.invites
     """
+    logger.info("=" * 60)
+    logger.info("🔔 MEMBER_LEFT_CHANNEL EVENT RECEIVED")
+    logger.info(f"Event data: {event}")
+    
     if not AUTO_REINVITE_ENABLED:
+        logger.warning("❌ Auto re-invite is DISABLED. Set AUTO_REINVITE_ENABLED=true in .env")
         return
 
     channel_id = event.get("channel")
     user_id = event.get("user")
+    
+    logger.info(f"📋 Processing leave event:")
+    logger.info(f"   Channel ID: {channel_id}")
+    logger.info(f"   User ID: {user_id}")
+    logger.info(f"   Configured CHANNEL_ID: {CHANNEL_ID}")
+    logger.info(f"   TRACKED_USERS: {TRACKED_USERS}")
 
     if not channel_id or not user_id:
+        logger.warning("⚠️ Missing channel_id or user_id in event. Ignoring.")
         return
 
     # Only enforce for our target channel
     if CHANNEL_ID and channel_id != CHANNEL_ID:
+        logger.info(f"ℹ️ Channel {channel_id} doesn't match configured CHANNEL_ID {CHANNEL_ID}. Ignoring.")
         return
+    
+    logger.info(f"✅ Channel matches configured CHANNEL_ID")
 
     # If TRACKED_USERS is set, only enforce for those users
     if TRACKED_USERS and user_id not in TRACKED_USERS:
+        logger.info(f"ℹ️ User {user_id} is not in TRACKED_USERS list. Ignoring.")
+        logger.info(f"   TRACKED_USERS: {TRACKED_USERS}")
         return
+    
+    logger.info(f"✅ User {user_id} is in TRACKED_USERS list")
 
     # Don't try to invite the bot itself
     try:
         auth = client.auth_test()
         bot_user_id = auth.get("user_id")
+        logger.info(f"🤖 Bot user ID: {bot_user_id}")
         if bot_user_id and user_id == bot_user_id:
+            logger.info("ℹ️ User is the bot itself. Ignoring.")
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"⚠️ Could not get bot user ID: {e}")
+
+    # Get user name for logging
+    user_name = get_user_name(user_id)
+    logger.info(f"👤 User name: {user_name}")
 
     # Small delay helps avoid race conditions right after leave
+    logger.info(f"⏳ Waiting {AUTO_REINVITE_DELAY_SECONDS} seconds before re-inviting...")
     try:
         if AUTO_REINVITE_DELAY_SECONDS > 0:
             time.sleep(AUTO_REINVITE_DELAY_SECONDS)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"⚠️ Error during delay: {e}")
 
+    # Determine if channel is private (starts with 'G') or public (starts with 'C')
+    # Private channels use groups API, public channels use conversations API
+    logger.info(f"🔍 Channel type: {'PRIVATE' if channel_id.startswith('G') else 'PUBLIC'}")
+    
     try:
-        client.conversations_invite(channel=channel_id, users=user_id)
-        logger.info(f"Re-invited user {user_id} to channel {channel_id} after leaving.")
+        if channel_id.startswith('G'):
+            # Private channel - use groups.invite
+            logger.info(f"📤 Attempting to invite {user_name} ({user_id}) to PRIVATE channel {channel_id} using groups.invite...")
+            client.groups_invite(channel=channel_id, users=user_id)
+            logger.info(f"✅ SUCCESS: Re-invited {user_name} ({user_id}) to private channel {channel_id}")
+        else:
+            # Public channel - use conversations.invite or channels.invite
+            logger.info(f"📤 Attempting to invite {user_name} ({user_id}) to PUBLIC channel {channel_id}...")
+            try:
+                client.conversations_invite(channel=channel_id, users=user_id)
+                logger.info(f"✅ SUCCESS: Re-invited {user_name} ({user_id}) to public channel {channel_id} (using conversations API)")
+            except SlackApiError as e:
+                logger.warning(f"⚠️ conversations.invite failed: {e}, trying channels.invite...")
+                # Fallback to channels.invite for older workspaces
+                client.channels_invite(channel=channel_id, users=user_id)
+                logger.info(f"✅ SUCCESS: Re-invited {user_name} ({user_id}) to public channel {channel_id} (using channels API)")
     except SlackApiError as e:
         # Common errors: missing_scope, not_in_channel, cant_invite_self, cant_invite, already_in_channel
-        logger.error(f"Failed to re-invite user {user_id} to channel {channel_id}: {e}")
+        error_code = e.response.get("error", "")
+        error_msg = str(e)
+        
+        logger.error("=" * 60)
+        logger.error(f"❌ FAILED to re-invite {user_name} ({user_id}) to channel {channel_id}")
+        logger.error(f"   Error code: {error_code}")
+        logger.error(f"   Error message: {error_msg}")
+        
+        if error_code == "missing_scope":
+            logger.error("   🔴 SOLUTION: Add required scopes:")
+            if channel_id.startswith('G'):
+                logger.error("      - groups:read")
+                logger.error("      - groups:write.invites")
+            else:
+                logger.error("      - channels:read")
+                logger.error("      - channels:write.invites")
+            logger.error("   Then REINSTALL the app to apply scopes!")
+        elif error_code == "not_in_channel":
+            logger.error("   🔴 SOLUTION: Bot must be a member of the channel!")
+            logger.error("   Invite the bot to the channel first.")
+        elif error_code == "already_in_channel":
+            logger.info("   ℹ️ User is already in channel (may have been re-invited manually)")
+        elif error_code == "cant_invite":
+            logger.error("   🔴 SOLUTION: Bot doesn't have permission to invite users.")
+            logger.error("   Check workspace settings and bot permissions.")
+        else:
+            logger.error(f"   Unknown error. Check Slack API documentation for error code: {error_code}")
+        logger.error("=" * 60)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error during re-invite: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    logger.info("=" * 60)
 
 
 @slack_app.action("checkin_working")
@@ -885,6 +963,137 @@ def handle_daily_report(ack, body, respond):
     respond(blocks=blocks)
 
 
+@slack_app.command("/test-reinvite")
+def handle_test_reinvite(ack, body, respond):
+    """Test command to check auto re-invite configuration"""
+    ack()
+    
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*🔧 Auto Re-invite Configuration Test*"
+            }
+        },
+        {
+            "type": "divider"
+        }
+    ]
+    
+    # Check configuration
+    status_blocks = []
+    
+    # Check if enabled
+    if AUTO_REINVITE_ENABLED:
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"✅ *Auto Re-invite:* ENABLED"
+            }
+        })
+    else:
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"❌ *Auto Re-invite:* DISABLED\nSet `AUTO_REINVITE_ENABLED=true` in .env"
+            }
+        })
+    
+    # Check channel ID
+    if CHANNEL_ID:
+        channel_type = "PRIVATE" if CHANNEL_ID.startswith('G') else "PUBLIC"
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"✅ *Channel ID:* {CHANNEL_ID} ({channel_type})"
+            }
+        })
+    else:
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"❌ *Channel ID:* NOT SET\nSet `SLACK_CHANNEL_ID` in .env"
+            }
+        })
+    
+    # Check tracked users
+    if TRACKED_USERS:
+        users_list = "\n".join([f"• {uid}" for uid in TRACKED_USERS])
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"✅ *Tracked Users:* {len(TRACKED_USERS)} users\n{users_list}"
+            }
+        })
+    else:
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"ℹ️ *Tracked Users:* NOT SET (will track all users who leave)"
+            }
+        })
+    
+    # Check required scopes
+    channel_type = "PRIVATE" if CHANNEL_ID and CHANNEL_ID.startswith('G') else "PUBLIC"
+    if channel_type == "PRIVATE":
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"📋 *Required Scopes for {channel_type} Channel:*\n• `groups:read`\n• `groups:write.invites`"
+            }
+        })
+    else:
+        status_blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"📋 *Required Scopes for {channel_type} Channel:*\n• `channels:read`\n• `channels:write.invites`"
+            }
+        })
+    
+    status_blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"📋 *Required Event:*\n• `member_left_channel` (add in Event Subscriptions)"
+        }
+    })
+    
+    status_blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"⏱️ *Re-invite Delay:* {AUTO_REINVITE_DELAY_SECONDS} seconds"
+        }
+    })
+    
+    blocks.extend(status_blocks)
+    
+    # Add instructions
+    blocks.extend([
+        {
+            "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*📝 How to Test:*\n1. Have a tracked user leave the channel\n2. Check bot logs: `sudo journalctl -u slack-time-bot -f`\n3. Bot should automatically invite them back"
+            }
+        }
+    ])
+    
+    respond(blocks=blocks)
+
+
 # Flask routes for Slack events
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
@@ -896,6 +1105,24 @@ def slack_events():
 def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+
+@flask_app.route("/debug/reinvite", methods=["GET"])
+def debug_reinvite():
+    """Debug endpoint to check auto re-invite configuration"""
+    return {
+        "auto_reinvite_enabled": AUTO_REINVITE_ENABLED,
+        "channel_id": CHANNEL_ID,
+        "channel_type": "PRIVATE" if CHANNEL_ID and CHANNEL_ID.startswith('G') else "PUBLIC" if CHANNEL_ID else "NOT SET",
+        "tracked_users": TRACKED_USERS,
+        "tracked_users_count": len(TRACKED_USERS) if TRACKED_USERS else 0,
+        "reinvite_delay_seconds": AUTO_REINVITE_DELAY_SECONDS,
+        "required_scopes": {
+            "PRIVATE": ["groups:read", "groups:write.invites"],
+            "PUBLIC": ["channels:read", "channels:write.invites"]
+        },
+        "required_event": "member_left_channel"
+    }
 
 
 @flask_app.route("/images/<filename>", methods=["GET"])
@@ -1031,6 +1258,25 @@ scheduler.add_job(
 
 scheduler.start()
 logger.info("Scheduler started - hourly reminders and daily reports configured")
+
+# Log configuration on startup
+logger.info("=" * 60)
+logger.info("🤖 BOT CONFIGURATION")
+logger.info("=" * 60)
+logger.info(f"Time Tracking Enabled: {TIMETRACKING_ENABLED}")
+logger.info(f"Channel ID: {CHANNEL_ID} ({'PRIVATE' if CHANNEL_ID and CHANNEL_ID.startswith('G') else 'PUBLIC' if CHANNEL_ID else 'NOT SET'})")
+logger.info(f"Tracked Users: {len(TRACKED_USERS) if TRACKED_USERS else 'ALL'} ({TRACKED_USERS if TRACKED_USERS else 'All users in channel'})")
+logger.info(f"Auto Re-invite Enabled: {AUTO_REINVITE_ENABLED}")
+if AUTO_REINVITE_ENABLED:
+    logger.info(f"  Re-invite Delay: {AUTO_REINVITE_DELAY_SECONDS} seconds")
+    if CHANNEL_ID:
+        channel_type = "PRIVATE" if CHANNEL_ID.startswith('G') else "PUBLIC"
+        required_scopes = "groups:read, groups:write.invites" if channel_type == "PRIVATE" else "channels:read, channels:write.invites"
+        logger.info(f"  Required Scopes: {required_scopes}")
+        logger.info(f"  Required Event: member_left_channel")
+logger.info(f"Button Timeout: {BUTTON_TIMEOUT_MINUTES} minutes")
+logger.info(f"Image Generation: {IMAGE_ENABLED}")
+logger.info("=" * 60)
 
 
 if __name__ == "__main__":
