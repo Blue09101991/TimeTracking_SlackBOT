@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 from database import init_db, get_db_session, CheckIn, DailyReport
+import time
 
 # Load environment variables
 load_dotenv()
@@ -54,6 +55,13 @@ CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
 
 # Store user IDs for tracking (4 members)
 TRACKED_USERS = [uid.strip() for uid in os.environ.get("TRACKED_USER_IDS", "").split(",") if uid.strip()] if os.environ.get("TRACKED_USER_IDS") else []
+
+# Time tracking on/off
+TIMETRACKING_ENABLED = os.environ.get("TIMETRACKING_ENABLED", "true").lower() == "true"
+
+# Auto re-invite on leave (only works if Slack sends leave events for this channel and bot has permissions)
+AUTO_REINVITE_ENABLED = os.environ.get("AUTO_REINVITE_ENABLED", "false").lower() == "true"
+AUTO_REINVITE_DELAY_SECONDS = int(os.environ.get("AUTO_REINVITE_DELAY_SECONDS", "5"))
 
 # Timezone configuration (EST)
 EST = pytz.timezone('US/Eastern')
@@ -332,6 +340,9 @@ def schedule_button_timeout(message_ts: str, channel_id: str, blocks: List[Dict]
 
 def send_hourly_checkin_reminder():
     """Send hourly check-in reminder with interactive button and AI-generated humorous image"""
+    if not TIMETRACKING_ENABLED:
+        logger.debug("Time tracking disabled (TIMETRACKING_ENABLED=false). Skipping reminder.")
+        return
     if not CHANNEL_ID:
         logger.warning("Channel ID not set. Skipping reminder.")
         return
@@ -700,6 +711,55 @@ def handle_mention(event, say):
         say("Hi! I'm your time tracking bot. Use `@bot report` to see daily reports or `@bot help` for commands.")
 
 
+@slack_app.event("member_left_channel")
+def handle_member_left_channel(event, logger, client):
+    """
+    If a tracked user leaves the configured channel, invite them back.
+    Notes:
+    - Works only if Slack sends this event for your channel and the bot is a member.
+    - Requires Slack scopes: conversations:read + conversations:write
+    """
+    if not AUTO_REINVITE_ENABLED:
+        return
+
+    channel_id = event.get("channel")
+    user_id = event.get("user")
+
+    if not channel_id or not user_id:
+        return
+
+    # Only enforce for our target channel
+    if CHANNEL_ID and channel_id != CHANNEL_ID:
+        return
+
+    # If TRACKED_USERS is set, only enforce for those users
+    if TRACKED_USERS and user_id not in TRACKED_USERS:
+        return
+
+    # Don't try to invite the bot itself
+    try:
+        auth = client.auth_test()
+        bot_user_id = auth.get("user_id")
+        if bot_user_id and user_id == bot_user_id:
+            return
+    except Exception:
+        pass
+
+    # Small delay helps avoid race conditions right after leave
+    try:
+        if AUTO_REINVITE_DELAY_SECONDS > 0:
+            time.sleep(AUTO_REINVITE_DELAY_SECONDS)
+    except Exception:
+        pass
+
+    try:
+        client.conversations_invite(channel=channel_id, users=user_id)
+        logger.info(f"Re-invited user {user_id} to channel {channel_id} after leaving.")
+    except SlackApiError as e:
+        # Common errors: missing_scope, not_in_channel, cant_invite_self, cant_invite, already_in_channel
+        logger.error(f"Failed to re-invite user {user_id} to channel {channel_id}: {e}")
+
+
 @slack_app.action("checkin_working")
 @slack_app.action("checkin_break")
 @slack_app.action("checkin_away")
@@ -710,6 +770,11 @@ def handle_checkin(ack, body, respond, client):
     status = action_id.replace("checkin_", "")
     channel_id = body["channel"]["id"]
     message_ts = body["message"]["ts"]  # Get message timestamp
+
+    if not TIMETRACKING_ENABLED:
+        ack()
+        respond(text="⏸️ Time tracking is currently disabled by admin.", replace_original=False)
+        return
     
     # CRITICAL: Check if buttons are disabled (timeout expired) BEFORE ack()
     if message_ts in disabled_messages:
@@ -937,6 +1002,9 @@ logger.info(f"Hourly reminders scheduled: {schedule_desc}")
 # Schedule daily report (every day at 6 PM EST)
 def send_daily_report():
     """Send daily report to channel"""
+    if not TIMETRACKING_ENABLED:
+        logger.debug("Time tracking disabled (TIMETRACKING_ENABLED=false). Skipping daily report.")
+        return
     if not CHANNEL_ID:
         logger.warning("Channel ID not set. Skipping daily report.")
         return

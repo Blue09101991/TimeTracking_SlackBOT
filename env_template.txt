@@ -10,6 +10,25 @@ SLACK_CHANNEL_ID=C1234567890
 # Example: TRACKED_USER_IDS=U1234567890,U0987654321,U1122334455,U5566778899
 TRACKED_USER_IDS=
 
+# Time Tracking Switch
+# TIMETRACKING_ENABLED: Master switch to enable/disable time tracking features
+#   true  = send reminders, allow check-ins, send daily reports
+#   false = pause everything (no reminders, no check-ins, no daily reports)
+TIMETRACKING_ENABLED=true
+
+# Auto Re-invite Users Who Leave Channel (Optional)
+# AUTO_REINVITE_ENABLED:
+#   true  = if a tracked user leaves the channel, bot will invite them back
+#   false = do nothing (default)
+# Notes:
+# - Requires Slack app event subscription: member_left_channel
+# - Requires bot scopes: conversations:read, conversations:write
+# - Bot must be a member of the channel
+AUTO_REINVITE_ENABLED=false
+
+# Delay before re-inviting (seconds). Helps avoid race conditions.
+AUTO_REINVITE_DELAY_SECONDS=5
+
 # Server Configuration
 PORT=3000
 
